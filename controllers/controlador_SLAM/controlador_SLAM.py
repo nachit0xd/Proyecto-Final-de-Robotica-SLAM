@@ -3,7 +3,7 @@ controlador_SLAM.py
 
 Línea B: SLAM / Mapeo Autónomo Simplificado
 
-Hasta ahora, este controlador implementa:
+Este controlador implementa:
   Fase 1:
     1. Configuración de motores diferenciales (velocidad continua).
     2. Lectura de encoders de rueda.
@@ -17,11 +17,16 @@ Hasta ahora, este controlador implementa:
     8. Grilla de ocupación 2D con modelo log-odds.
     9. Trazado de rayos con algoritmo de Bresenham.
     10. Visualización del mapa generado (en formato PPM).
-    11. Navegación reactiva básica para cubrir el entorno.
+  Fase 4:
+    11. Máquina de estados (AVANZAR → REBOTAR).
+    12. Exploración reactiva por deambulación y rebotes en el sitio (Roomba-style).
+    13. Pesos Braitenberg para esquive suave y proporcional a media distancia.
+    14. Métrica de cobertura del mapa explorado.
 """
 
 import math
 import os
+import random
 from controller import Robot
 
 # ============================================================================
@@ -353,34 +358,80 @@ def guardar_mapa(nombre_archivo=None):
 
 
 # ============================================================================
-# Rutina de prueba - Fase 3: Navegación reactiva para mapeo
+# Funciones auxiliares de Navegación 
 # ============================================================================
-# El robot navega de forma reactiva por el entorno: avanza mientras no detecte obstáculos cercanos, y al detectar uno gira para cambiar de dirección.
-# Mientras tanto, la grilla de ocupación se actualiza con cada lectura de los sensores y se guarda periódicamente como imagen.
 
-VELOCIDAD_AVANCE = 2.0       # velocidad al avanzar recto [rad/s]
-VELOCIDAD_GIRO = 1.5         # velocidad de giro al esquivar [rad/s]
+# Estados de la máquina de estados por Rebote Reactivo
+ESTADO_AVANZAR = 0          # avanzar recto y esquive suave Braitenberg
+ESTADO_REBOTAR = 1          # girar en el lugar para cambiar de rumbo
 
-# Umbrales de los sensores para la navegación reactiva
-# Recordar que los sensores del e-puck en Webots devuelven valores bajos (~60-150) incluso a distancias cortas. Umbrales bajos = reacción más temprana.
+NOMBRES_ESTADO = {
+    ESTADO_AVANZAR: "AVANZAR",
+    ESTADO_REBOTAR: "REBOTAR",
+}
 
-UMBRAL_PARED = 80            # valor del sensor para considerar pared cercana
-UMBRAL_PARED_MUY_CERCA = 150   # valor para pared muy cerca (giro fuerte)
+# Parámetros de navegación
+VELOCIDAD_AVANCE = 2.5      # velocidad base [rad/s]
+VELOCIDAD_GIRO = 2.0        # velocidad de giro en el lugar [rad/s]
+UMBRAL_DETECCION = 100      # valor de sensor para iniciar esquive suave
+UMBRAL_CRITICO = 350        # valor de sensor para activar rebote (giro en sitio)
+
+# Pesos Braitenberg para esquive suave (Fase 4): cada sensor contribuye con un peso a cada motor.
+# Sensores del lado derecho (ps0, ps1, ps2) hacen girar a la izquierda.
+# Sensores del lado izquierdo (ps5, ps6, ps7) hacen girar a la derecha.
+#             ps0   ps1   ps2   ps3   ps4   ps5   ps6   ps7
+PESOS_IZQ = [-1.0, -0.5, -0.2,  0.0,  0.0,  0.2,  0.5,  1.0]
+PESOS_DER = [ 1.0,  0.5,  0.2,  0.0,  0.0, -0.2, -0.5, -1.0]
+FACTOR_BRAITENBERG = 0.01       # factor de escala para las influencias
+
+
+def calcular_braitenberg(valores_sensores):
+    """
+    Función que calcula las velocidades de los motores usando pesos Braitenberg.
+
+    Cada sensor contribuye proporcionalmente a cada motor según su peso.
+    Esto produce un giro suave y continuo que es proporcional a la
+    cercanía de los obstáculos, en vez de giros bruscos tipo on/off.
+    """
+    influencia_izq = sum(v * p for v, p in zip(valores_sensores, PESOS_IZQ))
+    influencia_der = sum(v * p for v, p in zip(valores_sensores, PESOS_DER))
+    vel_izq = VELOCIDAD_AVANCE + influencia_izq * FACTOR_BRAITENBERG
+    vel_der = VELOCIDAD_AVANCE + influencia_der * FACTOR_BRAITENBERG
+    return vel_izq, vel_der
+
+
+def calcular_cobertura():
+    """
+    Función que calcula el porcentaje de celdas de la grilla que han sido exploradas.
+    Una celda se considera explorada si su valor log-odds se ha movido significativamente del valor inicial (0), es decir, si el robot
+    ya pasó por ahí y detectó que era libre u ocupada.
+    """
+    exploradas = 0
+    total = GRID_ANCHO * GRID_ALTO
+    for fila in range(GRID_ALTO):
+        for col in range(GRID_ANCHO):
+            if abs(grilla[fila][col]) > 0.1:
+                exploradas += 1
+    return (exploradas / total) * 100.0
+
+
+# ============================================================================
+# Variables de estado de la máquina de estados
+# ============================================================================
+estado_actual = ESTADO_AVANZAR
+tiempo_giro_restante = 0.0
+direccion_giro = 1.0                # 1.0 para izquierda, -1.0 para derecha
 
 tiempo_simulacion = 0.0
-paso_seg = timestep / 1000.0   # convertir timestep de ms a segundos
+paso_seg = timestep / 1000.0        # convertir timestep de ms a segundos
 
 print("=" * 60)
-print("  FASE 3 - Mapeo con Grilla de Ocupación")
+print("  FASE 4 - Exploración Autónoma Inteligente (Rebote Reactivo)")
 print("=" * 60)
-print(f"  Grilla:       {GRID_ANCHO}x{GRID_ALTO} celdas")
-print(f"  Resolución:   {GRID_RESOLUCION*100:.0f} cm/celda")
-print(f"  Arena:        {ARENA_ANCHO}x{ARENA_ALTO} m")
-print(f"  Modelo:       Log-odds (occ={LOG_ODD_OCUPADO}, "
-      f"libre={LOG_ODD_LIBRE})")
-print(f"  Mapa guardado en: {RUTA_MAPA}")
-print("=" * 60)
-print("  El robot explorará el entorno reactivamente...")
+print(f"  Grilla:       {GRID_ANCHO}x{GRID_ALTO} celdas "
+      f"({GRID_RESOLUCION*100:.0f} cm/celda)")
+print(f"  Estrategia:   Rebote Reactivo + Braitenberg (Roomba-style)")
+print(f"  Mapa:         {RUTA_MAPA}")
 print("=" * 60)
 
 # ============================================================================
@@ -407,71 +458,68 @@ while robot.step(timestep) != -1:
     for (px, py) in puntos_detectados:
         actualizar_grilla(x, y, px, py)
 
-    # Navegación reactiva (Fase 3)
-    # Leemos los sensores frontales y laterales para decidir el movimiento
+    # Lectura de valores crudos de sensores para navegación
     valores_sensores = [sensores_ir[i].getValue() for i in range(8)]
 
-    # Sensores frontales: ps0 (frontal derecho) y ps7 (frontal izquierdo)
-    # Sensores diagonales: ps1 (diagonal derecho) y ps6 (diagonal izquierdo)
+    # Sensores clave para detección frontal/diagonal:
     frontal_der = valores_sensores[0]
     diagonal_der = valores_sensores[1]
-    frontal_izq = valores_sensores[7]
     diagonal_izq = valores_sensores[6]
+    frontal_izq = valores_sensores[7]
+    
+    # Máximo valor detectado en el arco frontal
+    max_frente = max(frontal_der, frontal_izq, diagonal_der, diagonal_izq)
 
-    # Lógica de navegación reactiva
-    obstaculo_frente = (frontal_der > UMBRAL_PARED or
-                        frontal_izq > UMBRAL_PARED)
-    obstaculo_derecha = diagonal_der > UMBRAL_PARED
-    obstaculo_izquierda = diagonal_izq > UMBRAL_PARED
+    # ===================================================================
+    # MÁQUINA DE ESTADOS (Wander y Rebote Reactivo)
+    # ===================================================================
 
-    if frontal_der > UMBRAL_PARED_MUY_CERCA or frontal_izq > UMBRAL_PARED_MUY_CERCA:
-        # Muy cerca de pared frontal: girar fuerte a la izquierda
-        set_velocidades(-VELOCIDAD_GIRO, VELOCIDAD_GIRO)
-        fase_actual = "GIRO FUERTE IZQ"
-    elif obstaculo_frente and obstaculo_derecha:
-        # Obstáculo al frente y a la derecha: girar a la izquierda
-        set_velocidades(-VELOCIDAD_GIRO * 0.5, VELOCIDAD_GIRO)
-        fase_actual = "GIRO IZQUIERDA"
-    elif obstaculo_frente and obstaculo_izquierda:
-        # Obstáculo al frente y a la izquierda: girar a la derecha
-        set_velocidades(VELOCIDAD_GIRO, -VELOCIDAD_GIRO * 0.5)
-        fase_actual = "GIRO DERECHA"
-    elif obstaculo_frente:
-        # Obstáculo solo al frente: girar a la izquierda por defecto
-        set_velocidades(-VELOCIDAD_GIRO, VELOCIDAD_GIRO)
-        fase_actual = "GIRO (FRENTE)"
-    elif obstaculo_derecha:
-        # Obstáculo a la derecha: curva suave a la izquierda
-        set_velocidades(VELOCIDAD_AVANCE * 0.5, VELOCIDAD_AVANCE)
-        fase_actual = "CURVA IZQ"
-    elif obstaculo_izquierda:
-        # Obstáculo a la izquierda: curva suave a la derecha
-        set_velocidades(VELOCIDAD_AVANCE, VELOCIDAD_AVANCE * 0.5)
-        fase_actual = "CURVA DER"
-    else:
-        # Camino libre: avanzar recto
-        set_velocidades(VELOCIDAD_AVANCE, VELOCIDAD_AVANCE)
-        fase_actual = "AVANZANDO"
+    if estado_actual == ESTADO_AVANZAR:
+        if max_frente > UMBRAL_CRITICO:
+            # Obstáculo muy cerca: iniciar Rebote (giro en el sitio)
+            estado_actual = ESTADO_REBOTAR
+            
+            # Decidir dirección del giro: girar hacia el lado con menos obstáculo
+            peso_derecho = frontal_der + diagonal_der
+            peso_izquierdo = frontal_izq + diagonal_izq
+            if peso_derecho > peso_izquierdo:
+                direccion_giro = 1.0   # girar a la izquierda (antihorario)
+            else:
+                direccion_giro = -1.0  # girar a la derecha (horario)
+            
+            # Duración aleatoria para romper ciclos, entre 0.6 y 1.2 segundos
+            tiempo_giro_restante = random.uniform(0.6, 1.2)
+        else:
+            # Avanzar: si hay obstáculos a media distancia, aplicar Braitenberg para esquive suave
+            if max_frente > UMBRAL_DETECCION:
+                vel_izq, vel_der = calcular_braitenberg(valores_sensores)
+            else:
+                vel_izq, vel_der = VELOCIDAD_AVANCE, VELOCIDAD_AVANCE
+            set_velocidades(vel_izq, vel_der)
+
+    elif estado_actual == ESTADO_REBOTAR:
+        # Girar en el sitio
+        set_velocidades(-direccion_giro * VELOCIDAD_GIRO, direccion_giro * VELOCIDAD_GIRO)
+        tiempo_giro_restante -= paso_seg
+        
+        if tiempo_giro_restante <= 0.0:
+            # Cuando termina el giro, volver a avanzar
+            estado_actual = ESTADO_AVANZAR
 
     # Guardamos el mapa periódicamente
     if int(tiempo_simulacion * 1000) % int(MAPA_INTERVALO_GUARDADO * 1000) < timestep:
+        cobertura = calcular_cobertura()
         guardar_mapa()
-        print(f"  [MAPA] Grilla guardada → {os.path.basename(RUTA_MAPA)}")
+        print(f"  [MAPA] Guardado | Cobertura: {cobertura:.1f}%")
 
-    # Imprimimos el estado cada ~1 segundo
-    if int(tiempo_simulacion * 1000) % 1000 < timestep:
+    # Imprimimos el estado cada ~2 segundos para no saturar la consola
+    if int(tiempo_simulacion * 1000) % 2000 < timestep:
         theta_deg = math.degrees(theta)
+        nombre_estado = NOMBRES_ESTADO.get(estado_actual, "?")
         print(
-            f"[{tiempo_simulacion:6.1f}s] {fase_actual:18s} | "
-            f"X={x:+7.4f} m  Y={y:+7.4f} m  θ={theta_deg:+7.1f}° | "
+            f"[{tiempo_simulacion:6.1f}s] {nombre_estado:14s} | "
+            f"X={x:+7.4f}  Y={y:+7.4f}  θ={theta_deg:+7.1f}° | "
             f"Det: {len(puntos_detectados)}"
-        )
-        # Debug: imprimir valores crudos de sensores frontales y diagonales
-        print(
-            f"         Sensores → ps0={valores_sensores[0]:6.1f}  "
-            f"ps1={valores_sensores[1]:6.1f}  "
-            f"ps6={valores_sensores[6]:6.1f}  "
-            f"ps7={valores_sensores[7]:6.1f}"
         )
 
     tiempo_simulacion += paso_seg
