@@ -18,4 +18,5 @@ TexturedBackgroundLight {
 RectangleArena {
 }
 E-puck {
+  controller "controlador_SLAM"
 }
