@@ -22,12 +22,22 @@ Este controlador implementa:
     12. Exploración reactiva por deambulación y rebotes en el sitio (Roomba-style).
     13. Pesos Braitenberg para esquive suave y proporcional a media distancia.
     14. Métrica de cobertura del mapa explorado.
+  Fase 5:
+    15. Registro de métricas de odometría en tiempo real (distancia recorrida y velocidad promedio).
+    16. Evaluación cuantitativa y comparativa entre escenarios de prueba.
+  Fase 6:
+    17. Integración de sensor LiDAR de 360 grados y largo rango (1.2m).
+    18. Modo dual configurable de mapeo (LiDAR vs Infrarrojo).
+    19. Mapeo de alta resolución optimizado por submuestreo de barrido.
 """
 
 import math
 import os
 import random
 from controller import Robot
+
+# Configuración del Modo de Mapeo
+USAR_LIDAR = True              # True: mapea usando LiDAR de 360°. False: mapea usando los 8 sensores IR
 
 # ============================================================================
 # Constantes del e-puck
@@ -104,6 +114,16 @@ for nombre in SENSOR_NOMBRES:
     sensor.enable(timestep)
     sensores_ir.append(sensor)
 
+# Inicialización de LiDAR
+lidar = None
+if USAR_LIDAR:
+    lidar = robot.getDevice('lidar')
+    if lidar is not None:
+        lidar.enable(timestep)
+    else:
+        print("[ADVERTENCIA] El dispositivo 'lidar' no fue encontrado en el robot. Usando sensores IR.")
+        USAR_LIDAR = False
+
 # ============================================================================
 # Variables de odometría
 # ============================================================================
@@ -111,6 +131,7 @@ for nombre in SENSOR_NOMBRES:
 x = 0.0       # posición X [m]
 y = 0.0       # posición Y [m]
 theta = 0.0   # orientación [rad]
+distancia_recorrida = 0.0     # distancia lineal acumulada recorrida [m]
 
 # Valores previos de los encoders (inicializados en la primera lectura)
 prev_encoder_izq = 0.0
@@ -151,7 +172,7 @@ def actualizar_odometria(enc_izq_actual, enc_der_actual):
         y_k  = y_{k-1} + Δs * sin(θ_{k-1} + Δφ/2)
         θ_k  = θ_{k-1} + Δφ
     """
-    global x, y, theta, prev_encoder_izq, prev_encoder_der
+    global x, y, theta, prev_encoder_izq, prev_encoder_der, distancia_recorrida
 
     # Diferencia angular de cada rueda desde el último paso
     delta_enc_izq = enc_izq_actual - prev_encoder_izq
@@ -164,6 +185,9 @@ def actualizar_odometria(enc_izq_actual, enc_der_actual):
     # Avance lineal del centro del robot y cambio de orientación
     delta_s = (delta_s_der + delta_s_izq) / 2.0
     delta_theta = (delta_s_der - delta_s_izq) / AXLE_LENGTH
+
+    # Acumulamos la distancia lineal recorrida
+    distancia_recorrida += abs(delta_s)
 
     # Actualizamos la posición global usando la orientación intermedia
     x += delta_s * math.cos(theta + delta_theta / 2.0)
@@ -451,8 +475,29 @@ while robot.step(timestep) != -1:
     # Cálculo de odometría (Fase 1)
     actualizar_odometria(enc_izq, enc_der)
 
-    # Lectura de sensores y obtención de puntos de obstáculos (Fase 2)
-    puntos_detectados = obtener_puntos_obstaculos()
+    # Percepción y Mapeo
+    puntos_detectados = []
+    if USAR_LIDAR:
+        # Obtenemos el barrido del LiDAR (lista de 360 distancias en metros)
+        lecturas_lidar = lidar.getRangeImage()
+        
+        # Submuestreo (1 de cada 5 grados para trazar 72 rayos y no sobrecargar la grilla)
+        paso_angular = (2 * math.pi) / 360.0
+        for i in range(0, 360, 5):
+            distancia = lecturas_lidar[i]
+            
+            # Filtramos las lecturas fuera de rango o infinitas/NaN
+            if 0.02 < distancia < 1.2 and not math.isinf(distancia) and not math.isnan(distancia):
+                # El ángulo del rayo en el marco global es la orientación del robot más el ángulo local del rayo.
+                # Webots LiDAR convención: el ángulo del rayo i es (i * paso_angular) relativo al frente y en sentido antihorario.
+                angulo_global = theta + (i * paso_angular)
+                
+                x_obs = x + distancia * math.cos(angulo_global)
+                y_obs = y + distancia * math.sin(angulo_global)
+                puntos_detectados.append((x_obs, y_obs))
+    else:
+        # Modo normal: usar los 8 sensores infrarrojos
+        puntos_detectados = obtener_puntos_obstaculos()
 
     # Actualización de la grilla de ocupación (Fase 3)
     for (px, py) in puntos_detectados:
@@ -510,7 +555,9 @@ while robot.step(timestep) != -1:
     if int(tiempo_simulacion * 1000) % int(MAPA_INTERVALO_GUARDADO * 1000) < timestep:
         cobertura = calcular_cobertura()
         guardar_mapa()
+        vel_promedio = distancia_recorrida / tiempo_simulacion if tiempo_simulacion > 0 else 0.0
         print(f"  [MAPA] Guardado | Cobertura: {cobertura:.1f}%")
+        print(f"  [MÉTRICAS] Tiempo: {tiempo_simulacion:.1f}s | Distancia: {distancia_recorrida:.2f}m | Vel Promedio: {vel_promedio:.2f} m/s")
 
     # Imprimimos el estado cada ~2 segundos para no saturar la consola
     if int(tiempo_simulacion * 1000) % 2000 < timestep:

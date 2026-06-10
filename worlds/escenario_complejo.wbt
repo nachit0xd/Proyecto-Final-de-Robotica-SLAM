@@ -32,17 +32,32 @@ E-puck {
   ]
 }
 CardboardBox {
-  translation 0.1 0.26 0.05
+  translation 0.2 0.3 0.05
   name "cardboard box(1)"
   size 0.1 0.1 0.1
 }
 CardboardBox {
-  translation 0.27 -0.01 0.05
+  translation -0.2 0.3 0.05
+  name "cardboard box(2)"
+  size 0.1 0.1 0.1
+}
+CardboardBox {
+  translation 0.3 -0.2 0.05
   name "cardboard box(3)"
   size 0.1 0.1 0.1
 }
 CardboardBox {
-  translation -0.27 -0.25 0.05
-  name "cardboard box(2)"
+  translation -0.3 -0.2 0.05
+  name "cardboard box(4)"
+  size 0.1 0.1 0.1
+}
+CardboardBox {
+  translation 0.0 -0.15 0.05
+  name "cardboard box(5)"
+  size 0.1 0.1 0.1
+}
+CardboardBox {
+  translation 0.0 0.1 0.05
+  name "cardboard box(6)"
   size 0.1 0.1 0.1
 }
