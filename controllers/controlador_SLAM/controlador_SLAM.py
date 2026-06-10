@@ -13,9 +13,15 @@ Hasta ahora, este controlador implementa:
     5. Filtro de media móvil para estabilizar lecturas de sensores.
     6. Conversión de valores crudos a distancia en metros.
     7. Transformación de detecciones del marco local al marco global.
+  Fase 3:
+    8. Grilla de ocupación 2D con modelo log-odds.
+    9. Trazado de rayos con algoritmo de Bresenham.
+    10. Visualización del mapa generado (en formato PPM).
+    11. Navegación reactiva básica para cubrir el entorno.
 """
 
 import math
+import os
 from controller import Robot
 
 # ============================================================================
@@ -40,6 +46,27 @@ SENSOR_MAX_VALUE = 4095.0       # valor máximo del sensor
 SENSOR_MAX_RANGE = 0.04         # alcance efectivo máximo [m] (aprox. 4 cm)
 
 FILTRO_VENTANA = 5              # tamaño de la ventana del filtro de media móvil
+
+# Constantes de la grilla de ocupación 
+GRID_RESOLUCION = 0.01          # 1 cm por celda [m/celda]
+ARENA_ANCHO = 1.0               # ancho de la arena [m]
+ARENA_ALTO = 1.0                # alto de la arena [m]
+GRID_ANCHO = int(ARENA_ANCHO / GRID_RESOLUCION)   # 100 columnas
+GRID_ALTO = int(ARENA_ALTO / GRID_RESOLUCION)      # 100 filas
+
+# Offset: el punto origen de Webots (0,0) está en el centro del arena.
+# Desplazamos las coordenadas para que la esquina inferior-izquierda del arena corresponda a la celda (0, 0) de la grilla.
+GRID_OFFSET_X = ARENA_ANCHO / 2.0   # 0.5 m
+GRID_OFFSET_Y = ARENA_ALTO / 2.0    # 0.5 m
+
+# Parámetros del modelo log-odds
+LOG_ODD_OCUPADO = 0.85       # incremento al detectar obstáculo
+LOG_ODD_LIBRE = -0.40        # decremento para celdas libres
+LOG_ODD_MAX = 5.0            # límite superior (alta confianza ocupado)
+LOG_ODD_MIN = -5.0           # límite inferior (alta confianza libre)
+
+# Intervalo para guardar el mapa [segundos de simulación]
+MAPA_INTERVALO_GUARDADO = 5.0
 
 # ============================================================================
 # Inicialización del robot
@@ -73,7 +100,7 @@ for nombre in SENSOR_NOMBRES:
     sensores_ir.append(sensor)
 
 # ============================================================================
-# Variables de odometría 
+# Variables de odometría
 # ============================================================================
 # Posición y orientación estimadas del robot en el marco global
 x = 0.0       # posición X [m]
@@ -90,6 +117,15 @@ primera_lectura = True
 # ============================================================================
 # Historial de lecturas para el filtro de media móvil (una lista por sensor)
 historial_sensores = [[] for _ in range(8)]
+
+# ============================================================================
+# Variables de la grilla de ocupación
+# ============================================================================
+# Grilla de ocupación: matriz 2D inicializada en 0.0 (incertidumbre total, p=0.5)
+grilla = [[0.0] * GRID_ANCHO for _ in range(GRID_ALTO)]
+
+# Ruta donde se guardará el mapa (en la carpeta del controlador)
+RUTA_MAPA = os.path.join(os.path.dirname(__file__), "mapa_ocupacion.ppm")
 
 # ============================================================================
 # Funciones auxiliares de Odometría
@@ -207,25 +243,144 @@ def obtener_puntos_obstaculos():
 
 
 # ============================================================================
-# Rutina de prueba
+# Funciones auxiliares de Mapeo
 # ============================================================================
-# El robot avanzará lentamente en línea recta hacia la pared del arena y a medida que se acerque, los sensores frontales comenzarán a detectar
-# el obstáculo y se imprimirán las coordenadas globales de los puntos detectados para validar la transformación de coordenadas.
 
-VELOCIDAD_PRUEBA = 1.5   # velocidad lenta para acercarse a la pared [rad/s]
+def mundo_a_grilla(x_mundo, y_mundo):
+    """
+    Función que convierte las coordenadas del mundo de Webots (metros) a índices
+    (fila, columna) de la grilla de ocupación.
+
+    El punto origen de Webots (0, 0) está en el centro del arena, por lo que
+    se aplica un offset para que la esquina inferior-izquierda del arena
+    corresponda a la celda (0, 0).
+    """
+    col = int((x_mundo + GRID_OFFSET_X) / GRID_RESOLUCION)
+    fila = int((y_mundo + GRID_OFFSET_Y) / GRID_RESOLUCION)
+    # Limitamos a los bordes de la grilla
+    col = max(0, min(GRID_ANCHO - 1, col))
+    fila = max(0, min(GRID_ALTO - 1, fila))
+    return fila, col
+
+
+def bresenham(fila0, col0, fila1, col1):
+    """
+    Función que genera la lista de celdas (fila, col) sobre la línea recta entre
+    (fila0, col0) y (fila1, col1) usando el algoritmo de Bresenham.
+
+    El algoritmo de Bresenham traza eficientemente una línea discreta en la grilla,
+    permitiendo marcar todas las celdas que el rayo del sensor atraviesa entre el robot y el punto de obstáculo detectado.
+    """
+    celdas = []
+    df = abs(fila1 - fila0)
+    dc = abs(col1 - col0)
+    sf = 1 if fila1 > fila0 else -1
+    sc = 1 if col1 > col0 else -1
+    err = df - dc
+
+    f, c = fila0, col0
+
+    while True:
+        celdas.append((f, c))
+        if f == fila1 and c == col1:
+            break
+        e2 = 2 * err
+        if e2 > -dc:
+            err -= dc
+            f += sf
+        if e2 < df:
+            err += df
+            c += sc
+
+    return celdas
+
+
+def actualizar_grilla(x_robot, y_robot, x_obs, y_obs):
+    """
+    Función que actualiza la grilla de ocupación a partir de una detección de obstáculo.
+
+    Dado el punto del robot (x_robot, y_robot) y un punto de obstáculo
+    detectado (x_obs, y_obs):
+      1. Traza una línea con Bresenham del robot al obstáculo.
+      2. Marca las celdas intermedias como LIBRES (log-odds negativo).
+      3. Marca la celda final como OCUPADA (log-odds positivo).
+
+    Usa el modelo log-odds para actualizar probabilísticamente cada celda, con límites para evitar saturación excesiva.
+    """
+    fila_r, col_r = mundo_a_grilla(x_robot, y_robot)
+    fila_o, col_o = mundo_a_grilla(x_obs, y_obs)
+
+    celdas_linea = bresenham(fila_r, col_r, fila_o, col_o)
+
+    # Todas las celdas intermedias son libres, excepto la última que es ocupada
+    for fila, col in celdas_linea[:-1]:
+        grilla[fila][col] = max(LOG_ODD_MIN,
+                                grilla[fila][col] + LOG_ODD_LIBRE)
+
+    # La última celda es donde está el obstáculo
+    if celdas_linea:
+        fila_f, col_f = celdas_linea[-1]
+        grilla[fila_f][col_f] = min(LOG_ODD_MAX,
+                                     grilla[fila_f][col_f] + LOG_ODD_OCUPADO)
+
+
+def guardar_mapa(nombre_archivo=None):
+    """
+    Función que guarda la grilla de ocupación como imagen PPM (Portable PixMap).
+    No requiere matplotlib ni ninguna librería externa.
+
+    Escala de colores:
+      - Negro  = ocupado (log-odds alto, probabilidad alta)
+      - Blanco  = libre  (log-odds bajo, probabilidad baja)
+      - Gris   = desconocido (log-odds ≈ 0, probabilidad ≈ 0.5)
+    """
+    if nombre_archivo is None:
+        nombre_archivo = RUTA_MAPA
+
+    with open(nombre_archivo, 'w') as f:
+        f.write(f"P3\n{GRID_ANCHO} {GRID_ALTO}\n255\n")
+        # Invertimos las filas para que Y crezca hacia arriba en la imagen
+        for fila in reversed(range(GRID_ALTO)):
+            for col in range(GRID_ANCHO):
+                # Convertir log-odds a probabilidad de ocupación [0, 1]
+                log_odd = grilla[fila][col]
+                prob_ocupado = 1.0 / (1.0 + math.exp(-log_odd))
+                # Invertir: prob alta (ocupado) → oscuro, prob baja (libre) → claro
+                valor = int((1.0 - prob_ocupado) * 255)
+                valor = max(0, min(255, valor))
+                f.write(f"{valor} {valor} {valor} ")
+            f.write("\n")
+
+
+# ============================================================================
+# Rutina de prueba - Fase 3: Navegación reactiva para mapeo
+# ============================================================================
+# El robot navega de forma reactiva por el entorno: avanza mientras no detecte obstáculos cercanos, y al detectar uno gira para cambiar de dirección.
+# Mientras tanto, la grilla de ocupación se actualiza con cada lectura de los sensores y se guarda periódicamente como imagen.
+
+VELOCIDAD_AVANCE = 2.0       # velocidad al avanzar recto [rad/s]
+VELOCIDAD_GIRO = 1.5         # velocidad de giro al esquivar [rad/s]
+
+# Umbrales de los sensores para la navegación reactiva
+# Recordar que los sensores del e-puck en Webots devuelven valores bajos (~60-150) incluso a distancias cortas. Umbrales bajos = reacción más temprana.
+
+UMBRAL_PARED = 80            # valor del sensor para considerar pared cercana
+UMBRAL_PARED_MUY_CERCA = 150   # valor para pared muy cerca (giro fuerte)
 
 tiempo_simulacion = 0.0
 paso_seg = timestep / 1000.0   # convertir timestep de ms a segundos
 
 print("=" * 60)
-print("  FASE 2 - Prueba de Percepción y Transformación")
+print("  FASE 3 - Mapeo con Grilla de Ocupación")
 print("=" * 60)
-print(f"  Sensores IR:          {len(sensores_ir)} (ps0–ps7)")
-print(f"  Filtro:               Media móvil (ventana={FILTRO_VENTANA})")
-print(f"  Alcance efectivo:     {SENSOR_MAX_RANGE*100:.1f} cm")
-print(f"  Umbral de detección:  {SENSOR_UMBRAL_DETECCION}")
+print(f"  Grilla:       {GRID_ANCHO}x{GRID_ALTO} celdas")
+print(f"  Resolución:   {GRID_RESOLUCION*100:.0f} cm/celda")
+print(f"  Arena:        {ARENA_ANCHO}x{ARENA_ALTO} m")
+print(f"  Modelo:       Log-odds (occ={LOG_ODD_OCUPADO}, "
+      f"libre={LOG_ODD_LIBRE})")
+print(f"  Mapa guardado en: {RUTA_MAPA}")
 print("=" * 60)
-print("  El robot avanzará hacia la pared del arena...")
+print("  El robot explorará el entorno reactivamente...")
 print("=" * 60)
 
 # ============================================================================
@@ -242,36 +397,81 @@ while robot.step(timestep) != -1:
         prev_encoder_der = enc_der
         primera_lectura = False
 
-    # Calculo de odometría 
+    # Cálculo de odometría (Fase 1)
     actualizar_odometria(enc_izq, enc_der)
 
-    # Leemos los sensores y obtenemos los puntos de obstáculos
+    # Lectura de sensores y obtención de puntos de obstáculos (Fase 2)
     puntos_detectados = obtener_puntos_obstaculos()
 
-    # Rutina de movimiento de prueba:
-    # Avanzar recto; si un sensor frontal detecta algo muy cerca, detenerse
-    sensor_frontal_izq = sensores_ir[7].getValue()
-    sensor_frontal_der = sensores_ir[0].getValue()
-    obstaculo_cerca = sensor_frontal_izq > 1000 or sensor_frontal_der > 1000
+    # Actualización de la grilla de ocupación (Fase 3)
+    for (px, py) in puntos_detectados:
+        actualizar_grilla(x, y, px, py)
 
-    if obstaculo_cerca:
-        set_velocidades(0.0, 0.0)
-        fase_actual = "DETENIDO (PARED)"
+    # Navegación reactiva (Fase 3)
+    # Leemos los sensores frontales y laterales para decidir el movimiento
+    valores_sensores = [sensores_ir[i].getValue() for i in range(8)]
+
+    # Sensores frontales: ps0 (frontal derecho) y ps7 (frontal izquierdo)
+    # Sensores diagonales: ps1 (diagonal derecho) y ps6 (diagonal izquierdo)
+    frontal_der = valores_sensores[0]
+    diagonal_der = valores_sensores[1]
+    frontal_izq = valores_sensores[7]
+    diagonal_izq = valores_sensores[6]
+
+    # Lógica de navegación reactiva
+    obstaculo_frente = (frontal_der > UMBRAL_PARED or
+                        frontal_izq > UMBRAL_PARED)
+    obstaculo_derecha = diagonal_der > UMBRAL_PARED
+    obstaculo_izquierda = diagonal_izq > UMBRAL_PARED
+
+    if frontal_der > UMBRAL_PARED_MUY_CERCA or frontal_izq > UMBRAL_PARED_MUY_CERCA:
+        # Muy cerca de pared frontal: girar fuerte a la izquierda
+        set_velocidades(-VELOCIDAD_GIRO, VELOCIDAD_GIRO)
+        fase_actual = "GIRO FUERTE IZQ"
+    elif obstaculo_frente and obstaculo_derecha:
+        # Obstáculo al frente y a la derecha: girar a la izquierda
+        set_velocidades(-VELOCIDAD_GIRO * 0.5, VELOCIDAD_GIRO)
+        fase_actual = "GIRO IZQUIERDA"
+    elif obstaculo_frente and obstaculo_izquierda:
+        # Obstáculo al frente y a la izquierda: girar a la derecha
+        set_velocidades(VELOCIDAD_GIRO, -VELOCIDAD_GIRO * 0.5)
+        fase_actual = "GIRO DERECHA"
+    elif obstaculo_frente:
+        # Obstáculo solo al frente: girar a la izquierda por defecto
+        set_velocidades(-VELOCIDAD_GIRO, VELOCIDAD_GIRO)
+        fase_actual = "GIRO (FRENTE)"
+    elif obstaculo_derecha:
+        # Obstáculo a la derecha: curva suave a la izquierda
+        set_velocidades(VELOCIDAD_AVANCE * 0.5, VELOCIDAD_AVANCE)
+        fase_actual = "CURVA IZQ"
+    elif obstaculo_izquierda:
+        # Obstáculo a la izquierda: curva suave a la derecha
+        set_velocidades(VELOCIDAD_AVANCE, VELOCIDAD_AVANCE * 0.5)
+        fase_actual = "CURVA DER"
     else:
-        set_velocidades(VELOCIDAD_PRUEBA, VELOCIDAD_PRUEBA)
+        # Camino libre: avanzar recto
+        set_velocidades(VELOCIDAD_AVANCE, VELOCIDAD_AVANCE)
         fase_actual = "AVANZANDO"
 
-    # Imprime el estado cada ~500 ms
-    if int(tiempo_simulacion * 1000) % 500 < timestep:
+    # Guardamos el mapa periódicamente
+    if int(tiempo_simulacion * 1000) % int(MAPA_INTERVALO_GUARDADO * 1000) < timestep:
+        guardar_mapa()
+        print(f"  [MAPA] Grilla guardada → {os.path.basename(RUTA_MAPA)}")
+
+    # Imprimimos el estado cada ~1 segundo
+    if int(tiempo_simulacion * 1000) % 1000 < timestep:
         theta_deg = math.degrees(theta)
         print(
-            f"[{tiempo_simulacion:6.2f}s] {fase_actual:18s} | "
-            f"X={x:+7.4f} m  Y={y:+7.4f} m  θ={theta_deg:+8.2f}°"
+            f"[{tiempo_simulacion:6.1f}s] {fase_actual:18s} | "
+            f"X={x:+7.4f} m  Y={y:+7.4f} m  θ={theta_deg:+7.1f}° | "
+            f"Det: {len(puntos_detectados)}"
         )
+        # Debug: imprimir valores crudos de sensores frontales y diagonales
         print(
-            f"         Detecciones: {len(puntos_detectados)} puntos"
+            f"         Sensores → ps0={valores_sensores[0]:6.1f}  "
+            f"ps1={valores_sensores[1]:6.1f}  "
+            f"ps6={valores_sensores[6]:6.1f}  "
+            f"ps7={valores_sensores[7]:6.1f}"
         )
-        for px, py in puntos_detectados:
-            print(f"           → ({px:+.4f}, {py:+.4f})")
 
     tiempo_simulacion += paso_seg

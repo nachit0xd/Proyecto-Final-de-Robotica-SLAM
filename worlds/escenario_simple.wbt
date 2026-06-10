@@ -4,12 +4,13 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/gctronic/e-puck/protos/E-puck.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/CardboardBox.proto"
 
 WorldInfo {
 }
 Viewpoint {
-  orientation -0.5773502691896257 0.5773502691896257 0.5773502691896257 2.0944
-  position -2.3560615146715235e-05 -2.3560681767417597e-05 1.6677181698791173
+  orientation -0.4931049001454399 0.39098474075288975 0.7771605303609745 2.0370864158394775
+  position 0.17732225175064695 -0.4697761577177905 1.1397287507656815
 }
 TexturedBackground {
 }
@@ -19,4 +20,19 @@ RectangleArena {
 }
 E-puck {
   controller "controlador_SLAM"
+}
+CardboardBox {
+  translation 0.1 0.26 0.05
+  name "cardboard box(1)"
+  size 0.1 0.1 0.1
+}
+CardboardBox {
+  translation 0.27 -0.01 0.05
+  name "cardboard box(3)"
+  size 0.1 0.1 0.1
+}
+CardboardBox {
+  translation -0.27 -0.25 0.05
+  name "cardboard box(2)"
+  size 0.1 0.1 0.1
 }
