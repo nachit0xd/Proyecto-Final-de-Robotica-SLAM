@@ -53,11 +53,11 @@ CardboardBox {
 }
 CardboardBox {
   translation 0.0 -0.15 0.05
-  name "cardboard box(5)"
-  size 0.1 0.1 0.1
+  name "interior wall(1)"
+  size 0.2 0.02 0.1
 }
 CardboardBox {
-  translation 0.0 0.1 0.05
-  name "cardboard box(6)"
-  size 0.1 0.1 0.1
+  translation 0.0 0.15 0.05
+  name "interior wall(2)"
+  size 0.02 0.2 0.1
 }
