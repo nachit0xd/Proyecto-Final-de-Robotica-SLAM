@@ -55,8 +55,7 @@ El e-puck cuenta con 8 sensores de proximidad infrarrojos analógicos (`ps0` a `
 * **Señal de salida:** Entrega valores analógicos en el rango $[0, 4095]$, donde mayor valor implica mayor proximidad física.
 * **Procesamiento de datos:**
     * **Filtro de Media Móvil:** Se implementa una ventana de filtrado de $5$ muestras por sensor para estabilizar las lecturas, optimizar el rendimiento y suprimir el ruido analógico del simulador.
-    * **Conversión a metros:** Las lecturas filtradas que superan un umbral mínimo de $80$ se mapean linealmente a distancia física real (metros) mediante la ecuación:
-        $$d = d_{max} \cdot \left(1.0 - \frac{\text{valor\_filtrado}}{\text{valor\_maximo}}\right)$$
+    * **Conversión a metros:** Las lecturas filtradas que superan un umbral mínimo de $80$ se mapean linealmente a distancia física real (metros) mediante la ecuación: $d = d_{max} \cdot \left(1.0 - \frac{\text{valor\_filtrado}}{\text{valor\_maximo}}\right)$
 
 ### 4. Sensor LiDAR (Light Detection and Ranging)
 
